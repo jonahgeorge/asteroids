@@ -3,115 +3,109 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"time"
 
 	"github.com/googollee/go-socket.io"
+	"github.com/lucasb-eyer/go-colorful"
 )
 
-var players []Player
+const (
+	FPS = 30 * time.Millisecond
+)
 
-type Point struct {
-	X float64 `json:"x"`
-	Y float64 `json:"y"`
-}
+var (
+	clients []Client
+)
 
-type Ship struct {
-	Position     Point   `json:"position"`
-	Acceleration Point   `json:"acceleration"`
-	Velocity     Point   `json:"velocity"`
-	Heading      float64 `json:"heading"`
-	Thrust       float64 `json:"thrust"`
-	TurnSpeed    float64 `json:"turn_speed"`
-}
+func main() {
+	socket := socketio.NewSocketIOServer(&socketio.Config{
+		HeartbeatTimeout: 2,
+		ClosingTimeout:   4,
+	})
 
-type Player struct {
-	Name string `json:"name"`
-	Ship Ship   `json:"ship"`
-}
+	// socket.io event handlers
+	socket.On("connect", handleConnect)
+	socket.On("move", handleMove)
+	socket.On("disconnect", handleDisconnect)
 
-func UpdatePlayers(socket *socketio.SocketIOServer) {
-	for _ = range time.Tick(30 * time.Millisecond) {
-		for key, _ := range players {
-			// Update location
-			players[key].Ship.Position.X += players[key].Ship.Velocity.X
-			players[key].Ship.Position.Y += players[key].Ship.Velocity.Y
-		}
-		// fmt.Printf("%+v\n", players)
-		bytes, _ := json.Marshal(players)
-		socket.Broadcast("update", string(bytes))
+	// serve a static file server at root url
+	socket.Handle("/", http.FileServer(http.Dir("./public/")))
+
+	// game loop
+	go UpdatePlayers(socket)
+
+	// listen on port 3000 and send to socket server
+	err := http.ListenAndServe(":3000", socket)
+	if err != nil {
+		panic(err.Error)
 	}
 }
 
-// Throw some error handling in
-func FindPlayerById(id string) int {
-	for k, v := range players {
-		if v.Name == id {
-			return k
-		}
-	}
-	return -1
+func handleConnect(ns *socketio.NameSpace) {
+	fmt.Println("user " + ns.Id() + " connected.")
+
+	var player Client
+	player.Name = ns.Id()
+	player.Ship.Position.X = 50
+	player.Ship.Position.Y = 50
+	player.Ship.Heading = 0
+	player.Ship.Thrust = 1
+	player.Ship.TurnSpeed = 0.3
+
+	player.Ship.Color = colorful.WarmColor().Hex()
+
+	clients = append(clients, player)
 }
 
-func move(ns *socketio.NameSpace, command string) {
-	index := FindPlayerById(ns.Id())
+func handleMove(ns *socketio.NameSpace, command string) {
+	index := FindClientById(ns.Id())
 
 	switch command {
 	case "up":
-		players[index].Ship.Acceleration.X = players[index].Ship.Thrust * math.Sin(players[index].Ship.Heading)
-		players[index].Ship.Acceleration.Y = players[index].Ship.Thrust * math.Cos(players[index].Ship.Heading)
-		players[index].Ship.Velocity.X += players[index].Ship.Acceleration.X
-		players[index].Ship.Velocity.Y += players[index].Ship.Acceleration.Y
+		clients[index].Ship.Acceleration.X = clients[index].Ship.Thrust * math.Sin(clients[index].Ship.Heading)
+		clients[index].Ship.Acceleration.Y = clients[index].Ship.Thrust * math.Cos(clients[index].Ship.Heading)
+		clients[index].Ship.Velocity.X += clients[index].Ship.Acceleration.X
+		clients[index].Ship.Velocity.Y += clients[index].Ship.Acceleration.Y
 
 	case "down":
 		// nada
 
 	case "left":
-		players[index].Ship.Heading += players[index].Ship.TurnSpeed
+		clients[index].Ship.Heading += clients[index].Ship.TurnSpeed
 
 	case "right":
-		players[index].Ship.Heading -= players[index].Ship.TurnSpeed
+		clients[index].Ship.Heading -= clients[index].Ship.TurnSpeed
 	}
 }
 
-func main() {
-	config := &socketio.Config{}
-	config.HeartbeatTimeout = 2
-	config.ClosingTimeout = 4
+func handleDisconnect(ns *socketio.NameSpace) {
+	fmt.Println("user " + ns.Id() + " disconnected.")
+	index := FindClientById(ns.Id())
+	clients = append(clients[:index], clients[index+1:]...)
+}
 
-	socket := socketio.NewSocketIOServer(config)
+// Iterate over clients and update ship locations
+func UpdatePlayers(socket *socketio.SocketIOServer) {
+	for _ = range time.Tick(FPS) {
+		for key, _ := range clients {
+			// Update location
+			clients[key].Ship.Position.X += clients[key].Ship.Velocity.X
+			clients[key].Ship.Position.Y += clients[key].Ship.Velocity.Y
+		}
+		bytes, _ := json.Marshal(clients)
+		socket.Broadcast("update", string(bytes))
+	}
+}
 
-	// Handler for new connections, also adds socket.io event handlers
-	socket.On("connect", func(ns *socketio.NameSpace) {
-		fmt.Println("user " + ns.Id() + " connected.")
-
-		var player Player
-		player.Name = ns.Id()
-		player.Ship.Position.X = 50
-		player.Ship.Position.Y = 50
-		player.Ship.Heading = 0
-		player.Ship.Thrust = 1
-		player.Ship.TurnSpeed = 0.3
-
-		players = append(players, player)
-		// fmt.Printf("%+v\n", players)
-	})
-
-	socket.On("disconnect", func(ns *socketio.NameSpace) {
-		fmt.Println("user " + ns.Id() + " disconnected.")
-		index := FindPlayerById(ns.Id())
-		players = append(players[:index], players[index+1:]...)
-	})
-
-	socket.On("move", move)
-
-	go UpdatePlayers(socket)
-
-	//this will serve a http static file server
-	socket.Handle("/", http.FileServer(http.Dir("./public/")))
-
-	//startup the server
-	log.Fatal(http.ListenAndServe(":3000", socket))
+// Retrieve index of player id
+// [todo] - Throw some error handling in
+func FindClientById(id string) int {
+	for k, v := range clients {
+		if v.Name == id {
+			return k
+		}
+	}
+	return -1
 }
